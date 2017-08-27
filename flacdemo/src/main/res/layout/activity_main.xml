@@ -28,6 +28,12 @@
         android:onClick="play"
         android:text="Play"/>
 
+    <Button
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:onClick="playWithDecoder"
+        android:text="Play with decoder"/>
+
     <TextView
         android:id="@+id/txtState"
         android:layout_width="wrap_content"

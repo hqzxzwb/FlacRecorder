@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.support.annotation.NonNull;
 import android.support.v4.app.ActivityCompat;
 import android.support.v7.app.AppCompatActivity;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
@@ -18,9 +19,11 @@ import android.widget.Toast;
 import java.io.File;
 import java.io.IOException;
 
+import wenbo.zhu.flac.FlacPlayer;
 import wenbo.zhu.flac.FlacRecorder;
 
 public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "MainActivity";
     private static final int REQUEST_PERMISSION_RECORD = 1;
     private FlacRecorder workingRecorder;
 
@@ -112,6 +115,14 @@ public class MainActivity extends AppCompatActivity {
             mediaPlayer.start();
         } catch (IOException e) {
             e.printStackTrace();
+        }
+    }
+
+    public void playWithDecoder(View view) {
+        FlacPlayer player = new FlacPlayer();
+        if (!player.init(file.getAbsolutePath())) {
+            Log.e(TAG, "Player init error.");
+            return;
         }
     }
 }
