@@ -124,5 +124,6 @@ public class MainActivity extends AppCompatActivity {
             Log.e(TAG, "Player init error.");
             return;
         }
+        player.play();
     }
 }

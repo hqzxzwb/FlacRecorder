@@ -9,7 +9,9 @@ jclass encoder_class;
 jfieldID encoder_field;
 jclass decoder_class;
 jfieldID decoder_field;
+jfieldID decoder_client_data_field;
 jmethodID decoder_init_result_method;
+jmethodID decoder_write_buffer_method;
 
 #define TAG "FlacJNI" // 这个是自定义的LOG的标识
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG,TAG ,__VA_ARGS__) // 定义LOGD类型
@@ -19,7 +21,7 @@ jmethodID decoder_init_result_method;
 #define LOGF(...) __android_log_print(ANDROID_LOG_FATAL,TAG ,__VA_ARGS__) // 定义LOGF类型
 
 FLAC__StreamEncoder *getEncoderFromInstance(JNIEnv *env, jobject instance) {
-    return reinterpret_cast<FLAC__StreamEncoder *>(env->GetLongField(instance, encoder_field));
+    return (FLAC__StreamEncoder *) env->GetLongField(instance, encoder_field);
 }
 
 extern "C"
@@ -125,22 +127,59 @@ public:
         result = env->CallObjectMethod(instance, decoder_init_result_method,
                                        total_samples, sample_rate, channels, bps);
     }
+
+    bool accept_buffer(const jbyte *buffer, int buffer_size) {
+        jbyteArray a = env->NewByteArray(buffer_size);
+        env->SetByteArrayRegion(a, 0, buffer_size, buffer);
+        return env->CallBooleanMethod(instance, decoder_write_buffer_method, a);
+    }
 };
 
 void metadata_callback(const FLAC__StreamDecoder *decoder, const FLAC__StreamMetadata *metadata,
                        void *client_data) {
     if (metadata->type == FLAC__METADATA_TYPE_STREAMINFO) {
-        DecoderClientData *data = reinterpret_cast<DecoderClientData *>(client_data);
+        DecoderClientData *data = (DecoderClientData *) client_data;
         data->accept_stream_meta_data(metadata);
     }
 }
 
-FLAC__StreamDecoderWriteStatus decoder_write_callback(const FLAC__StreamDecoder *decoder, const FLAC__Frame *frame, const FLAC__int32 * const buffer[], void *client_data) {
-
+FLAC__StreamDecoderWriteStatus
+decoder_write_callback(const FLAC__StreamDecoder *decoder, const FLAC__Frame *frame,
+                       const FLAC__int32 *const buffer[], void *client_data) {
+    LOGI("decoder_write_callback");
+    int bits_per_sample = frame->header.bits_per_sample;
+    int frame_count = frame->header.blocksize;
+    int channels = frame->header.channels;
+    int byte_count = frame_count * channels * bits_per_sample / 8;
+    jbyte *result = new jbyte[byte_count];
+    if (bits_per_sample == 8) {
+        for (int i = 0; i < frame_count; ++i) {
+            for (int j = 0; j < channels; ++j) {
+                result[i * channels + j] = (jbyte) buffer[j][i];
+            }
+        }
+    } else if (bits_per_sample == 16) {
+        for (int i = 0; i < frame_count; ++i) {
+            for (int j = 0; j < channels; ++j) {
+                int index = i * channels + j;
+                int buffer_value = buffer[j][i];
+                result[2 * index] = (jbyte) buffer_value;
+                result[2 * index + 1] = (jbyte) (buffer_value >> 8);
+            }
+        }
+    }
+    bool accepted = ((DecoderClientData *) client_data)->accept_buffer(result, byte_count);
+    if (accepted) {
+        return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
+    } else {
+        return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
+    }
 }
 
-void decoder_error_callback(const FLAC__StreamDecoder *decoder, FLAC__StreamDecoderErrorStatus status, void *client_data) {
-
+void
+decoder_error_callback(const FLAC__StreamDecoder *decoder, FLAC__StreamDecoderErrorStatus status,
+                       void *client_data) {
+    LOGE("ERROR: running decoder: %s\n", FLAC__StreamDecoderErrorStatusString[status]);
 }
 
 extern "C"
@@ -160,10 +199,11 @@ Java_wenbo_zhu_flac_FlacDecoder_init(JNIEnv *env, jobject instance, jstring inpu
     const char *input_file_chars = env->GetStringUTFChars(input_file, 0);
     DecoderClientData *client_data = new DecoderClientData(env, instance);
     init_status = FLAC__stream_decoder_init_file(decoder, input_file_chars, decoder_write_callback,
-                                                 metadata_callback, decoder_error_callback, client_data);
+                                                 metadata_callback, decoder_error_callback,
+                                                 client_data);
     if (init_status != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
         LOGE("ERROR: initializing decoder: %s\n",
-                FLAC__StreamDecoderInitStatusString[init_status]);
+             FLAC__StreamDecoderInitStatusString[init_status]);
         ok = false;
     }
 
@@ -172,10 +212,27 @@ Java_wenbo_zhu_flac_FlacDecoder_init(JNIEnv *env, jobject instance, jstring inpu
     }
 
     if (ok) {
+        env->SetLongField(instance, decoder_field, (jlong) decoder);
+        env->SetLongField(instance, decoder_client_data_field, (jlong) client_data);
         return client_data->result;
     } else {
         return NULL;
     }
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_wenbo_zhu_flac_FlacDecoder_nativeDecode(JNIEnv *env, jobject instance) {
+    DecoderClientData *data = (DecoderClientData *) env->GetLongField(instance,
+                                                                      decoder_client_data_field);
+    data->env = env;    // Reset in new thread.
+    data->instance = instance;
+
+    FLAC__StreamDecoder *decoder = (FLAC__StreamDecoder *) env->GetLongField(instance,
+                                                                             decoder_field);
+    jboolean result = (jboolean) FLAC__stream_decoder_process_until_end_of_stream(decoder);
+    FLAC__stream_decoder_delete(decoder);
+    return result;
 }
 
 JNIEXPORT
@@ -192,7 +249,10 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
 
     decoder_class = env->FindClass("wenbo/zhu/flac/FlacDecoder");
     decoder_field = env->GetFieldID(decoder_class, "decoderPointer", "J");
-    decoder_init_result_method = env->GetMethodID(decoder_class, "newStreamData", "(JIII)Ljava/lang/Object;");
+    decoder_client_data_field = env->GetFieldID(decoder_class, "clientDataPointer", "J");
+    decoder_init_result_method = env->GetMethodID(decoder_class, "newStreamData",
+                                                  "(JIII)Ljava/lang/Object;");
+    decoder_write_buffer_method = env->GetMethodID(decoder_class, "writeData", "([B)Z");
 
     return JNI_VERSION_1_6;
 }
